@@ -1,5 +1,6 @@
 from fpdf import FPDF, XPos, YPos  # Correct import for positional controls (finally)
 import os
+
 import sys
 import base64
 import re
