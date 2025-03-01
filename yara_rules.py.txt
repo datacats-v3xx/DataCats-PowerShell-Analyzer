@@ -1,4 +1,4 @@
-# yara_rules.py
+# *yara_rules.py
 yara_rules = """
 rule Invoke_Expression_Obfuscation
 {
