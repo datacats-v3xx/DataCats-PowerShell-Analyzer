@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt
 from fpdf import FPDF
 
 
-# 🔓 **Deobfuscation Functions**
+# Deobfuscation Functions
 def decode_base64(encoded_text):
     """Attempts to decode a Base64 string and logs the result."""
     try:
@@ -34,7 +34,7 @@ def decode_char_encoding(powershell_code):
     return None
 
 
-# 🚨 **Detect Malicious Commands & Block Execution**
+# Detect Malicious Commands & Block Execution
 def detect_malicious_powershell(script_content):
     """Checks for dangerous PowerShell commands. If found, execution is blocked."""
     dangerous_patterns = {
@@ -52,7 +52,7 @@ def detect_malicious_powershell(script_content):
     return None
 
 
-# ⚠️ **PowerShell Risk Analysis**
+# PowerShell Risk Analysis
 def calculate_risk(script_content):
     """Assigns a dynamic risk score based on suspicious PowerShell commands."""
     risk_scores = {
@@ -73,7 +73,7 @@ def calculate_risk(script_content):
     return total_risk, risk_label
 
 
-# 🔍 **PowerShell Analyzer with Deobfuscation & Execution Blocking**
+# PowerShell Analyzer with Deobfuscation & Execution Blocking
 def analyze_script(script_content):
     """Runs multiple security checks and blocks execution if dangerous commands are found."""
     
@@ -111,7 +111,7 @@ def analyze_script(script_content):
     return analysis_result, total_risk, risk_label
 
 
-# 🚀 **Main GUI Application**
+# Main GUI
 class PowerShellAnalyzer(QWidget):
     def __init__(self):
         super().__init__()
