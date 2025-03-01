@@ -1,182 +1,145 @@
-from fpdf import FPDF, XPos, YPos  # Correct import for positional controls (finally)
-import os
-
 import sys
+import os
 import base64
 import re
 import hashlib
-import requests
-import whois
-from bs4 import BeautifulSoup
-from fpdf import FPDF
-from pygments import lex
-from pygments.lexers import PowerShellLexer
-from pygments.token import Token
+import datetime
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QTextEdit,
-    QFileDialog, QLabel, QProgressBar, QTabWidget, QLineEdit, QPlainTextEdit, QCheckBox, QMessageBox
+    QFileDialog, QLabel, QProgressBar, QLineEdit, QPlainTextEdit, QCheckBox, QMessageBox
 )
-from PyQt5.QtGui import QTextCharFormat, QColor, QFont, QSyntaxHighlighter, QPainter
-from PyQt5.QtCore import Qt, QSettings
-
-# YARA Integration
-import yara
-from yara_rules import yara_rules
+from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt
+from fpdf import FPDF
 
 
-def run_yara_analysis(script_content):
-    """⚡ Run YARA rules against the provided PowerShell script content."""
+# 🔓 **Deobfuscation Functions**
+def decode_base64(encoded_text):
+    """Attempts to decode a Base64 string and logs the result."""
     try:
-        rules = yara.compile(source=yara_rules)
-        matches = rules.match(data=script_content)
-        return matches
-    except Exception as e:
-        print(f"⚠️ YARA analysis failed: {e}")
-        return []
+        decoded_bytes = base64.b64decode(encoded_text)
+        decoded_text = decoded_bytes.decode('utf-8', errors='ignore')
+        print(f"Decoded Base64: {decoded_text}")  # ✅ Log decoding results
+        return decoded_text
+    except Exception:
+        return None
 
 
-# PowerShell Syntax Highlighter
-class PowerShellHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent):
-        super(PowerShellHighlighter, self).__init__(parent)
-        self.lexer = PowerShellLexer()
-        self.styles = {
-            Token.Keyword: self.format(QColor('#bd93f9'), 'bold'),
-            Token.Name: self.format(QColor('#f8f8f2')),
-            Token.Comment: self.format(QColor('#6272a4'), 'italic'),
-            Token.String: self.format(QColor('#8be9fd')),
-            Token.Operator: self.format(QColor('#ffb86c')),
-            Token.Number: self.format(QColor('#bd93f9')),
-            Token.Punctuation: self.format(QColor('#f8f8f2')),
-            Token.Text: self.format(QColor('#f8f8f2')),
-        }
-
-    def format(self, color, style=''):
-        _format = QTextCharFormat()
-        _format.setForeground(color)
-        if 'bold' in style:
-            _format.setFontWeight(QFont.Bold)
-        if 'italic' in style:
-            _format.setFontItalic(True)
-        return _format
-
-    def highlightBlock(self, text):
-        for token, content in lex(text, self.lexer):
-            length = len(content)
-            index = text.find(content)
-            if index >= 0:
-                self.setFormat(index, length, self.styles.get(token, QTextCharFormat()))
+def decode_char_encoding(powershell_code):
+    """Detects and converts PowerShell char obfuscation like '[char]72+[char]101' to 'Hello'."""
+    matches = re.findall(r"\[char\](\d+)", powershell_code)
+    if matches:
+        decoded_string = ''.join(chr(int(num)) for num in matches)
+        return decoded_string
+    return None
 
 
-# Code Editor - Has problems with line numbers. Future work needed.
-class CodeEditor(QPlainTextEdit):
-    def __init__(self, parent=None):
-        super(CodeEditor, self).__init__(parent)
-        self.lineNumberArea = QWidget(self)
-        self.suspicious_lines = set()
-        self.blockCountChanged.connect(self.updateLineNumberAreaWidth)
-        self.updateRequest.connect(self.updateLineNumberArea)
-        self.cursorPositionChanged.connect(self.highlightCurrentLine)
-        self.updateLineNumberAreaWidth(0)
-
-    def lineNumberAreaWidth(self):
-        digits = len(str(self.blockCount()))
-        return 3 + self.fontMetrics().width('9') * digits
-
-    def updateLineNumberAreaWidth(self, _=None):
-        self.setViewportMargins(self.lineNumberAreaWidth(), 0, 0, 0)
-
-    def updateLineNumberArea(self, rect, dy):
-        if dy:
-            self.lineNumberArea.scroll(0, dy)
-        else:
-            self.lineNumberArea.update(0, rect.y(), self.lineNumberArea.width(), rect.height())
-        if rect.contains(self.viewport().rect()):
-            self.updateLineNumberAreaWidth(0)
-
-    def highlightCurrentLine(self):
-        extraSelections = []
-        if not self.isReadOnly():
-            selection = QTextEdit.ExtraSelection()
-            lineColor = QColor("#5a4b8a").lighter(160)  # Deep purple glow
-            selection.format.setBackground(lineColor)
-            selection.format.setProperty(QTextCharFormat.FullWidthSelection, True)
-            selection.cursor = self.textCursor()
-            selection.cursor.clearSelection()
-            extraSelections.append(selection)
-        self.setExtraSelections(extraSelections)
+# 🚨 **Detect Malicious Commands & Block Execution**
+def detect_malicious_powershell(script_content):
+    """Checks for dangerous PowerShell commands. If found, execution is blocked."""
+    dangerous_patterns = {
+        r"Invoke-Expression": "⚠️ Invoke-Expression (IEX) detected - Possible remote code execution",
+        r"Invoke-WebRequest": "⚠️ Invoke-WebRequest detected - Possible remote file download",
+        r"Start-Process": "⚠️ Start-Process detected - May launch external executables",
+        r"Set-MpPreference": "⚠️ Set-MpPreference detected - Disables Windows Defender",
+        r"New-ItemProperty": "⚠️ Registry Persistence detected - Script modifies startup settings"
+    }
+    
+    warnings = [msg for pattern, msg in dangerous_patterns.items() if re.search(pattern, script_content, re.IGNORECASE)]
+    
+    if warnings:
+        return warnings  # 🚨 Block execution if ANY dangerous command is found
+    return None
 
 
-# Drag-and-Drop Text Editor - If it was actually working. PS drag/drop still needs work.
-class DragDropTextEdit(QTextEdit):
-    """✨ Supports drag-and-drop for PowerShell scripts."""
+# ⚠️ **PowerShell Risk Analysis**
+def calculate_risk(script_content):
+    """Assigns a dynamic risk score based on suspicious PowerShell commands."""
+    risk_scores = {
+        'Invoke-WebRequest': 50, 'Invoke-Expression': 40, 'Start-Process': 30,
+        'Set-MpPreference': 25, 'Add-MpPreference': 20, 'IEX': 50
+    }
+    total_risk = sum(score for cmd, score in risk_scores.items() if cmd.lower() in script_content.lower())
 
-    def __init__(self, load_callback=None):
-        super().__init__()
-        self.load_callback = load_callback
-        self.setAcceptDrops(True)
-        self.setStyleSheet("""
-            QTextEdit {
-                border: 2px dashed #8a2be2;
-                background-color: #1e1e2e;
-                color: #f8f8f2;
-                font-family: Consolas;
-                font-size: 12pt;
-            }
-        """)
+    if total_risk > 100:
+        risk_label = "CRITICAL 🔴"
+    elif total_risk > 60:
+        risk_label = "HIGH 🟠"
+    elif total_risk > 30:
+        risk_label = "MEDIUM 🟡"
+    else:
+        risk_label = "LOW 🟢"
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            file_path = url.toLocalFile()
-            if file_path.lower().endswith('.ps1'):
-                self.load_callback(file_path)
-            else:
-                QMessageBox.warning(self, "⚠️ Unsupported File",
-                                    "Only .ps1 PowerShell scripts are supported.")
+    return total_risk, risk_label
 
 
-# 🐾 Main Analyzer Application - The Prowler
-class DataCatsAnalyzer(QWidget):
+# 🔍 **PowerShell Analyzer with Deobfuscation & Execution Blocking**
+def analyze_script(script_content):
+    """Runs multiple security checks and blocks execution if dangerous commands are found."""
+    
+    # 🛑 Step 1: Block Execution If Malicious Commands Are Found
+    warnings = detect_malicious_powershell(script_content)
+    if warnings:
+        warning_message = "\n🚨 **Execution Blocked: Suspicious PowerShell Detected!**\n"
+        for warning in warnings:
+            warning_message += f"🔴 {warning}\n"
+        return warning_message, 100, "CRITICAL 🔴"  # 🚨 Always return max risk score if execution is blocked
+
+    # 🟢 Step 2: Attempt to decode Base64
+    base64_matches = re.findall(r'FromBase64String\("([^"]+)"\)', script_content)
+    decoded_b64_strings = [decode_base64(match) for match in base64_matches if decode_base64(match)]
+    
+    # 🟢 Step 3: Attempt to decode `[char]` obfuscation
+    decoded_char_text = decode_char_encoding(script_content)
+
+    # 🟢 Step 4: Construct output with decoded values
+    analysis_result = "🔍 **PowerShell Analyzer Report**\n=================================\n"
+
+    if decoded_b64_strings:
+        analysis_result += "🛠 **Decoded Base64 Strings:**\n"
+        for decoded in decoded_b64_strings:
+            analysis_result += f"🔓 {decoded}\n"
+    
+    if decoded_char_text:
+        analysis_result += f"\n🛠 **Decoded Char Encoding:**\n🔓 {decoded_char_text}\n"
+
+    # 🟢 Step 5: Run risk analysis
+    total_risk, risk_label = calculate_risk(script_content)
+    
+    analysis_result += f"\n⚠️ **Risk Level:** {risk_label}\n"
+
+    return analysis_result, total_risk, risk_label
+
+
+# 🚀 **Main GUI Application**
+class PowerShellAnalyzer(QWidget):
     def __init__(self):
         super().__init__()
-        self.settings = QSettings('DataCats™', 'Preferences')
-        self.dark_mode = self.settings.value('dark_mode', True, type=bool)
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('🐾 DataCats™: PowerShell Analyzer')
+        self.setWindowTitle('🐾 PowerShell Analyzer')
         self.setGeometry(100, 100, 1200, 800)
         main_layout = QVBoxLayout()
 
         self.darkModeToggle = QCheckBox("🌙 Dark Mode")
-        self.darkModeToggle.setChecked(self.dark_mode)
+        self.darkModeToggle.setChecked(True)
         self.darkModeToggle.stateChanged.connect(self.toggleDarkMode)
         main_layout.addWidget(self.darkModeToggle)
 
         self.searchBox = QLineEdit(self)
         self.searchBox.setPlaceholderText('🔍 Search analysis or code...')
-        self.searchBox.textChanged.connect(self.search_text)
         main_layout.addWidget(self.searchBox)
 
-        self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
-
-        self.codeView = CodeEditor(self)
+        self.codeView = QPlainTextEdit(self)
         self.codeView.setReadOnly(True)
         self.codeView.setFont(QFont('Consolas', 10))
-        self.highlighter = PowerShellHighlighter(self.codeView.document())
-        self.tabs.addTab(self.codeView, "💻 Code View")
+        main_layout.addWidget(self.codeView)
 
         self.analysisView = QTextEdit(self)
         self.analysisView.setReadOnly(True)
         self.analysisView.setFont(QFont('Consolas', 10))
-        self.tabs.addTab(self.analysisView, "📊 Analysis")
+        main_layout.addWidget(self.analysisView)
 
         self.openBtn = QPushButton('📂 Open PowerShell Script')
         self.openBtn.clicked.connect(self.openFile)
@@ -193,153 +156,104 @@ class DataCatsAnalyzer(QWidget):
         main_layout.addWidget(self.riskBar)
 
         self.setLayout(main_layout)
-        self.applyTheme()
+        
+        # Apply dark mode by default
+        self.toggleDarkMode()
 
     def toggleDarkMode(self):
-        self.dark_mode = self.darkModeToggle.isChecked()
-        self.settings.setValue('dark_mode', self.dark_mode)
-        self.applyTheme()
-
-    def applyTheme(self):
-        if self.dark_mode:
+        """Toggles dark mode for the UI."""
+        if self.darkModeToggle.isChecked():
             self.setStyleSheet("""
                 QWidget { background-color: #1a1a2e; color: #f8f8f2; }
-                QPushButton { background-color: #bd93f9; color: #1a1a2e; padding: 8px; border-radius: 5px; }
-                QPushButton:hover { background-color: #caa7fa; }
-                QLineEdit { background-color: #333; color: #f8f8f2; padding: 5px; }
-                QTextEdit { background-color: #1a1a2e; color: #f8f8f2; }
-                QTabWidget::pane { border: 1px solid #bd93f9; }
-                QTabBar::tab { 
-                    background: #2a2a3d; 
-                    color: #e2e2f2; 
-                    padding: 10px; 
-                    border-radius: 4px;
-                }
-                QTabBar::tab:selected { 
-                    background: #bd93f9; 
-                    color: #1a1a2e; 
-                    font-weight: bold;
-                }
-                QTabBar::tab:hover { 
-                    background: #5a4b8a; 
-                    color: #ffffff;
-                }
+                QPushButton { background-color: #5a4b8a; color: #ffffff; font-weight: bold; padding: 8px; border-radius: 5px; }
+                QPushButton:hover { background-color: #7b5fb3; }
             """)
         else:
             self.setStyleSheet("")
-
-    def search_text(self, text):
-        self.codeView.find(text)
-        self.analysisView.find(text)
-
+            
     def openFile(self):
-        fileName, _ = QFileDialog.getOpenFileName(self, "Open PowerShell Script", "", "PowerShell Files (*.ps1)")
-        if fileName:
-            with open(fileName, 'r', encoding='utf-8') as file:
-                code = file.read()
-                self.codeView.setPlainText(code)
-                self.analyzeScript(code)
-
-    def analyzeScript(self, code):
-        self.analysisView.clear()
-        self.analysisView.append("=============================")
-        self.analysisView.append("🔐 HASHES & IDENTIFIERS")
-        self.analysisView.append("=============================")
-        for htype, hval in self.generate_hashes(code).items():
-            self.analysisView.append(f"• {htype}: {hval}")
-        self.analysisView.append("\n")
-
-        suspicious_cmds = {
-            'Invoke-WebRequest': 40, 'Invoke-Expression': 30,
-            'Set-MpPreference': 25, 'Add-MpPreference': 20,
-            'Start-Process': 15, 'IEX': 40
-        }
-        total_risk = 0
-        for idx, line in enumerate(code.split('\n')):
-            for cmd, score in suspicious_cmds.items():
-                if cmd.lower() in line.lower():
-                    total_risk += score
-                    self.analysisView.append(f"⚠️ [Line {idx + 1}] {cmd} ({score} pts)")
-                    self.codeView.suspicious_lines.add(idx + 1)
-        self.highlight_suspicious_lines()
-        risk_label = "LOW 🟢" if total_risk < 30 else "MEDIUM 🟡" if total_risk < 60 else "HIGH 🟠" if total_risk < 90 else "CRITICAL 🔴"
-        self.riskLabel.setText(f"🛡 Risk Level: {risk_label}")
-        self.riskBar.setValue(min(total_risk, 100))
-
-    def highlight_suspicious_lines(self):
-        extraSelections = []
-        for line_num in self.codeView.suspicious_lines:
-            selection = QTextEdit.ExtraSelection()
-            lineColor = QColor("#5a4b8a").lighter(160)
-            selection.format.setBackground(lineColor)
-            cursor = self.codeView.textCursor()
-            cursor.movePosition(cursor.Start)
-            cursor.movePosition(cursor.Down, cursor.MoveAnchor, line_num - 1)
-            cursor.select(cursor.LineUnderCursor)
-            selection.cursor = cursor
-            extraSelections.append(selection)
-        self.codeView.setExtraSelections(extraSelections)
-
-    def generate_hashes(self, code):
-        return {
-            'SHA-256': hashlib.sha256(code.encode()).hexdigest(),
-            'SHA-1': hashlib.sha1(code.encode()).hexdigest(),
-            'MD5': hashlib.md5(code.encode()).hexdigest()
-        }
-
-    from fpdf import FPDF, XPos, YPos  # Ensures XPos and YPos are imported
-    import os
+        """Opens a PowerShell script file and analyzes it."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 'Open PowerShell Script', '', 
+            'PowerShell Scripts (*.ps1);;All Files (*)'
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    script_content = file.read()
+                    
+                # Display the script content
+                self.codeView.setPlainText(script_content)
+                
+                # Analyze the script
+                analysis_result, risk_score, risk_label = analyze_script(script_content)
+                
+                # Update the UI with analysis results
+                self.analysisView.setText(analysis_result)
+                self.riskLabel.setText(f'🛡 Risk Level: {risk_label}')
+                self.riskBar.setValue(risk_score)
+                
+            except Exception as e:
+                self.analysisView.setText(f"Error analyzing file: {str(e)}")
+                self.riskLabel.setText('🛡 Risk Level: Error')
+                self.riskBar.setValue(0)
 
     def export_report(self):
+        """Exports the analysis results to a PDF report."""
+        if not self.analysisView.toPlainText().strip():
+            QMessageBox.warning(self, "Export Failed", "No analysis results to export!")
+            return
+
         try:
+            # Create a text version of the report with emojis replaced by text descriptions
+            report_text = self.analysisView.toPlainText()
+            # Replace emojis with text alternatives
+            emoji_replacements = {
+                "🔍": "[ANALYSIS]", 
+                "🚨": "[ALERT]",
+                "⚠️": "[WARNING]",
+                "🔓": "[DECODED]",
+                "🛠": "[TOOL]",
+                "🔴": "[CRITICAL]",
+                "🟠": "[HIGH]",
+                "🟡": "[MEDIUM]",
+                "🟢": "[LOW]",
+                "🛡": "[PROTECTION]"
+            }
+            
+            for emoji, replacement in emoji_replacements.items():
+                report_text = report_text.replace(emoji, replacement)
+            
             pdf = FPDF()
-            pdf.set_auto_page_break(auto=True, margin=15)
             pdf.add_page()
+            pdf.set_font("Helvetica", size=12)  # Use Helvetica instead of Arial
+            
+            # Add a title
+            pdf.set_font("Helvetica", 'B', 16)
+            pdf.cell(0, 10, "PowerShell Analysis Report", ln=True, align='C')
+            pdf.ln(5)
+            
+            # Add timestamp
+            pdf.set_font("Helvetica", size=10)
+            pdf.cell(0, 10, f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+            pdf.ln(5)
+            
+            # Add the analysis content
+            pdf.set_font("Helvetica", size=11)
+            pdf.multi_cell(0, 7, report_text)
 
-            # 🐾 Use Segoe UI Emoji for full Unicode support because we like the damn paws.
-            font_path = "C:\\Windows\\Fonts\\seguiemj.ttf"  # Segoe UI Emoji path - Native is good
-            if os.path.exists(font_path):
-                pdf.add_font('SegoeUIEmoji', '', font_path)  # Removed deprecated 'uni=True'
-                pdf.set_font('SegoeUIEmoji', '', 16)
-            else:
-                QMessageBox.warning(self, "⚠️ Font Missing", "Segoe UI Emoji not found. Some icons may not display.")
-                pdf.set_font('Arial', size=16)
-
-            pdf.set_text_color(0, 0, 0)
-
-            # Title with corrected XPos/YPos usage
-            pdf.cell(200, 10, text="🐾 DataCats™ - IR Analysis Report",
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-
-            # Analysis Section Header
-            pdf.set_font('SegoeUIEmoji', '', 12)
-            pdf.set_text_color(0, 0, 255)
-            pdf.cell(0, 10, text="🔎 Analysis Section",
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-
-            # Analysis Content
-            pdf.set_font('SegoeUIEmoji', '', 10)
-            pdf.set_text_color(0, 0, 0)
-            pdf.multi_cell(0, 8, self.analysisView.toPlainText())
-
-            # Footer with Signature (Fixed line finally)
-            pdf.set_y(-20)
-            pdf.set_font('SegoeUIEmoji', '', 10)  # 🐾 Fixed this line
-            pdf.set_text_color(128, 128, 128)
-            pdf.cell(0, 10, text="🐾 Powered by DataCats™: Always lands on its feet. 😼✨",
-                     new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
-
-            # Export PDF - Adding a save as window might be preferable. Undecided.
-            pdf.output("DataCats_IR_Report.pdf")
-            QMessageBox.information(self, "✅ Export Complete", "Saved as 'DataCats_IR_Report.pdf'")
-
+            save_path, _ = QFileDialog.getSaveFileName(self, "Save Report", "PowerShell_Analysis_Report.pdf", "PDF Files (*.pdf)")
+            if save_path:
+                pdf.output(save_path)
+                QMessageBox.information(self, "Export Successful", f"Report saved as:\n{save_path}")
+        
         except Exception as e:
-            QMessageBox.critical(self, "⚠️ Export Failed", f"An error occurred:\n{str(e)}")
-if __name__ == '__main__':
-    import sys
-    from PyQt5.QtWidgets import QApplication
+            QMessageBox.critical(self, "Export Error", f"Failed to export PDF: {str(e)}")
 
+
+if __name__ == '__main__':
     app = QApplication(sys.argv)
-    datacats = DataCatsAnalyzer()  # Make sure the class name matches exactly
-    datacats.show()                # Show the main window
-    sys.exit(app.exec_())          # Start Qt event loop (use exec_() for PyQt5)
+    analyzer = PowerShellAnalyzer()
+    analyzer.show()
+    sys.exit(app.exec_())
